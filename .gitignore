@@ -1,0 +1,5 @@
+fieldgym.venv/
+.env
+__pycache__/
+fieldgym_prototype.excalidraw
+fieldgym_dataset_730days.csv
