@@ -6,7 +6,7 @@ altair
 psycopg2-binary
 sqlalchemy
 os
-dotenv import load_dotenv
+dotenv
 psycopg2
 plotly.express
 plotly
