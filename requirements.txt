@@ -5,3 +5,8 @@ numpy
 altair
 psycopg2-binary
 sqlalchemy
+os
+dotenv import load_dotenv
+psycopg2
+plotly.express
+plotly
