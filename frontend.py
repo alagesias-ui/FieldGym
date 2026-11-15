@@ -25,7 +25,8 @@ except Exception as e:
     print(f"❌Chyba při připojení k DB: {e}")
     exit()
 
-# MAIN DATAFRAME
+# DATAFRAMES
+## MAIN DATAFRAME
 try:
     query = "SELECT * FROM fct_fieldgym_data"
     df = pd.read_sql(query, con=engine)
@@ -34,11 +35,54 @@ except Exception as e:
     print(f"❌Chyba při načítání dat z databáze: {e}")
     exit()
 
-# TIME/DATE DATAFRAME
+## TIME/DATE DATAFRAME
 try:
     query = "SELECT DISTINCT * FROM fct_wdays_time"
     df_wdays = pd.read_sql(query, con=engine)
     print(f"✅Úspěšně načteno {len(df_wdays)} řádků z databáze!")
+except Exception as e:
+    print(f"❌Chyba při načítání dat z databáze: {e}")
+    exit()
+
+## FAVORITE ACTIVITIES DATAFRAME
+try:
+    query = "SELECT DISTINCT activity_type, total_visits FROM fct_favorite_activity_month"
+    df_activities = pd.read_sql(query, con=engine)
+    list_activities = ["Vše"] + df_activities['activity_type'].dropna().tolist()
+    print(f"✅Úspěšně načteno {len(df_activities)} řádků z databáze!")
+except Exception as e:
+    print(f"❌Chyba při načítání dat z databáze: {e}")
+    list_activities = ["Vše"]
+    exit()
+
+## FAVORITE TARIFFS DATAFRAME
+try:
+    query = "SELECT DISTINCT tariff_type, count FROM fct_favorite_tariffs"
+    df_tariffs = pd.read_sql(query, con=engine)
+    list_tariffs = ["Vše"] + df_tariffs['tariff_type'].dropna().tolist()
+    print(f"✅Úspěšně načteno {len(df_tariffs)} řádků z databáze!")
+except Exception as e:
+    print(f"❌Chyba při načítání dat z databáze: {e}")
+    list_tariffs = ["Vše"]
+    exit()
+
+## DATES DATAFRAME
+try:
+    query = "SELECT MIN(date_only) AS min_date, MAX(date_only) AS max_date FROM fct_fieldgym_data"
+    df_dates = pd.read_sql(query, con=engine)
+    print(f"✅Úspěšně načteno rozsah dat z databáze!")
+    min_date = df_dates["min_date"].iloc[0]
+    max_date = df_dates["max_date"].iloc[0]
+except Exception as e:
+    print(f"❌Chyba při načítání dat z databáze: {e}")
+    exit()
+
+## CHURN DATAFRAME
+try:
+    query = "SELECT member_id, total_visits, first_visit, last_visit, days_since_last_visit FROM fct_churn"
+    df_churn = pd.read_sql(query, con=engine)
+    df_churn.rename(columns={'member_id': 'ID člena', 'total_visits': 'Počet návštěv', 'days_since_last_visit': 'Dny od poslední návštěvy','first_visit':'První návštěva','last_visit':'Poslední návštěva'}, inplace=True)
+    print(f"✅Úspěšně načteno {len(df_churn)} řádků z databáze!")
 except Exception as e:
     print(f"❌Chyba při načítání dat z databáze: {e}")
     exit()
@@ -58,39 +102,6 @@ visitors_yesterday_delta_pct = ((visitors_yesterday - average_daily_visitors) / 
 members_active_currently = df['member_id'].nunique()
 members_active_last_month = df[df['date_only'] >= (max(df['date_only']) - pd.Timedelta(days=30))]['member_id'].nunique()
 members_delta_pct = ((members_active_currently - members_active_last_month) / members_active_last_month) * 100 if members_active_last_month != 0 else 0
-
-# FAVORITE ACTIVITIES
-try:
-    query = "SELECT DISTINCT activity_type FROM fct_favorite_tariffs"
-    df_activities = pd.read_sql(query, con=engine)
-    list_activities = ["Vše"] + df_activities['activity_type'].dropna().tolist()
-    print(f"✅Úspěšně načteno {len(df_activities)} řádků z databáze!")
-except Exception as e:
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    list_activities = ["Vše"]
-    exit()
-
-# FAVORITE TARIFFS
-try:
-    query = "SELECT DISTINCT tariff_type FROM fct_favorite_tariffs"
-    df_tariffs = pd.read_sql(query, con=engine)
-    list_tariffs = ["Vše"] + df_tariffs['tariff_type'].dropna().tolist()
-    print(f"✅Úspěšně načteno {len(df_tariffs)} řádků z databáze!")
-except Exception as e:
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    list_tariffs = ["Vše"]
-    exit()
-
-# DATES
-try:
-    query = "SELECT MIN(date_only) AS min_date, MAX(date_only) AS max_date FROM fct_fieldgym_data"
-    df_dates = pd.read_sql(query, con=engine)
-    print(f"✅Úspěšně načteno rozsah dat z databáze!")
-    min_date = df_dates["min_date"].iloc[0]
-    max_date = df_dates["max_date"].iloc[0]
-except Exception as e:
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    exit()
 
 # CHARTS
 ## Aktuální trend návštěvnosti - line chart
@@ -112,6 +123,10 @@ current_trend_chart.update_layout(
 
 ## Vytíženost v čase - heatmap
 occupancy_chart = px.density_heatmap(df_wdays, x='hour', y='den_v_tydnu', z='member_id', histfunc='count', color_continuous_scale='Viridis', labels={'hour': 'Hodina', 'den_v_tydnu': 'Den v týdnu', 'member_id': 'Počet návštěv'}, title='Vytíženost v čase')
+
+## Podíl tarifů a aktivit - pie charts
+pie_chart_tariffs = px.pie(df_tariffs, names='tariff_type', values='count', title='Podíl tarifů mezi členy fitka', color_discrete_sequence=px.colors.sequential.RdBu)
+pie_chart_activities = px.pie(df_activities, names='activity_type', values='total_visits', title='Podíl aktivit mezi členy fitka', color_discrete_sequence=px.colors.sequential.RdBu)
 
 # FORMATTING
 ## Světle modro-bílá (prostřední část): #F0F8F8; Tmavě modro-zelená / petrolejová (spodní část): #112E35
@@ -216,8 +231,22 @@ st.header('Vytíženost v čase', divider='gray')
 st.plotly_chart(occupancy_chart)
 st.text('Vizuál ukazuje vytíženost fitka v jednotlivých dnech a jednotlivých hodnách. Časové období lze upravit pomocí filtru v levém panelu.')
 st.header('Podíl tarifů a aktivit', divider='gray')
+col1, col2 = st.columns(2)
+with col1:
+    st.plotly_chart(pie_chart_activities, use_container_width=True)
+with col2:
+    st.plotly_chart(pie_chart_tariffs, use_container_width=True)
 st.text('Grafy ukazují podíl jednotlivých tarifů a aktivit mezi členy fitka. Časové období, aktivity a tarify lze upravit pomocí filtru v levém panelu.')
 st.header('Tabulka churnu', divider='gray')
+st.dataframe(
+    df_churn,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        col: st.column_config.Column(alignment="center")
+        for col in df_churn.columns
+    }
+)
 st.text('Tabulka ukazuje členy, kteří přestali (nebo možná brzy přestanou) navštěvovat fitko. Tabulku lze filtrovat podle aktivit a tarifů v levém panelu. Podle časového období filtrovat nelze')
 
 
