@@ -50,11 +50,11 @@ def load_dashboard_data():
         kpi_query = """
         WITH bounds AS (
             SELECT MIN(date_only::date) AS min_date, MAX(date_only::date) AS max_date
-            FROM fct_fieldgym_data
+            FROM public.fct_fieldgym_data
         ),
         daily AS (
             SELECT date_only::date AS d, COUNT(DISTINCT member_id) AS daily_visitors
-            FROM fct_fieldgym_data
+            FROM public.fct_fieldgym_data
             GROUP BY date_only::date
         )
         SELECT
@@ -65,14 +65,14 @@ def load_dashboard_data():
             COUNT(DISTINCT CASE WHEN f.date_only::date >= (b.max_date - 60) AND f.date_only::date < (b.max_date - 30) THEN f.member_id END) AS visitors_last_60_30_days,
             COUNT(DISTINCT CASE WHEN f.date_only::date = (b.max_date - 1) THEN f.member_id END) AS visitors_yesterday,
             (SELECT AVG(daily_visitors) FROM daily) AS average_daily_visitors
-        FROM fct_fieldgym_data f
+        FROM public.fct_fieldgym_data f
         CROSS JOIN bounds b
         GROUP BY b.min_date, b.max_date
         """
         df_kpis = pd.read_sql(kpi_query, con=conn)
 
         # 2. Weekly trend data
-        df_trend = pd.read_sql("SELECT * FROM fct_weeks", con=conn)
+        df_trend = pd.read_sql("SELECT * FROM public.fct_weeks", con=conn)
         df_trend["week_start"] = pd.to_datetime(df_trend["week_start"])
 
         # 3. Heatmap occupancy data pre-aggregated in SQL (max 168 rows instead of full table)
@@ -81,26 +81,26 @@ def load_dashboard_data():
             hour,
             TRIM(den_v_tydnu) AS den_v_tydnu,
             COUNT(member_id) AS visit_count
-        FROM (SELECT DISTINCT * FROM fct_wdays_time) t
+        FROM (SELECT DISTINCT * FROM public.fct_wdays_time) t
         GROUP BY hour, TRIM(den_v_tydnu)
         """
         df_wdays = pd.read_sql(wdays_query, con=conn)
 
         # 4. Favorite activities
         df_activities = pd.read_sql(
-            "SELECT DISTINCT activity_type, total_visits FROM fct_favorite_activity_month",
+            "SELECT DISTINCT activity_type, total_visits FROM public.fct_favorite_activity_month",
             con=conn,
         )
 
         # 5. Favorite tariffs
         df_tariffs = pd.read_sql(
-            "SELECT DISTINCT tariff_type, count FROM fct_favorite_tariffs",
+            "SELECT DISTINCT tariff_type, count FROM public.fct_favorite_tariffs",
             con=conn,
         )
 
         # 6. Churn table
         df_churn = pd.read_sql(
-            "SELECT member_id, total_visits, first_visit, last_visit, days_since_last_visit FROM fct_churn",
+            "SELECT member_id, total_visits, first_visit, last_visit, days_since_last_visit FROM public.fct_churn",
             con=conn,
         )
         for date_col in ["first_visit", "last_visit"]:
