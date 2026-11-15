@@ -14,113 +14,153 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# CONNECT TO DATABASE
+# CONNECT TO DATABASE & CACHE DATA
 load_dotenv()
-DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not DATABASE_URL:
-    print("❌CHYBA: Chybí DATABASE_URL v .env souboru!")
-    exit()
 
-engine_url = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1).replace("postgres://", "postgresql+psycopg2://", 1)
-engine = create_engine(engine_url)
+def get_database_url() -> str | None:
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        try:
+            db_url = st.secrets.get("DATABASE_URL")
+        except Exception:
+            db_url = None
+    return db_url
 
-try:
+
+@st.cache_resource(show_spinner=False)
+def get_engine():
+    db_url = get_database_url()
+    if not db_url:
+        st.error("❌ CHYBA: Chybí DATABASE_URL v .env souboru nebo ve Streamlit Secrets!")
+        st.stop()
+
+    engine_url = (
+        db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+        .replace("postgres://", "postgresql+psycopg2://", 1)
+    )
+    return create_engine(engine_url, pool_pre_ping=True)
+
+
+@st.cache_data(ttl=600, show_spinner="Načítání dat z databáze...")
+def load_dashboard_data():
+    engine = get_engine()
     with engine.connect() as conn:
-        print("✅Úspěšně připojeno k Neon.tech databázi přes SQLAlchemy!")
-except Exception as e:
-    print(f"❌Chyba při připojení k DB: {e}")
-    exit()
+        # 1. KPIs & Date Range aggregated directly in PostgreSQL (returns 1 row instead of whole table)
+        kpi_query = """
+        WITH bounds AS (
+            SELECT MIN(date_only::date) AS min_date, MAX(date_only::date) AS max_date
+            FROM fct_fieldgym_data
+        ),
+        daily AS (
+            SELECT date_only::date AS d, COUNT(DISTINCT member_id) AS daily_visitors
+            FROM fct_fieldgym_data
+            GROUP BY date_only::date
+        )
+        SELECT
+            b.min_date,
+            b.max_date,
+            COUNT(DISTINCT f.member_id) AS members_active_currently,
+            COUNT(DISTINCT CASE WHEN f.date_only::date >= (b.max_date - 30) THEN f.member_id END) AS visitors_last_30_days,
+            COUNT(DISTINCT CASE WHEN f.date_only::date >= (b.max_date - 60) AND f.date_only::date < (b.max_date - 30) THEN f.member_id END) AS visitors_last_60_30_days,
+            COUNT(DISTINCT CASE WHEN f.date_only::date = (b.max_date - 1) THEN f.member_id END) AS visitors_yesterday,
+            (SELECT AVG(daily_visitors) FROM daily) AS average_daily_visitors
+        FROM fct_fieldgym_data f
+        CROSS JOIN bounds b
+        GROUP BY b.min_date, b.max_date
+        """
+        df_kpis = pd.read_sql(kpi_query, con=conn)
 
-# DATAFRAMES
-## MAIN DATAFRAME
-try:
-    query = "SELECT * FROM fct_fieldgym_data"
-    df = pd.read_sql(query, con=engine)
-    print(f"✅Úspěšně načteno {len(df)} řádků z data  báze!")
-except Exception as e: 
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    exit()
+        # 2. Weekly trend data
+        df_trend = pd.read_sql("SELECT * FROM fct_weeks", con=conn)
+        df_trend["week_start"] = pd.to_datetime(df_trend["week_start"])
 
-## TREND DATAFRAME
-try:
-    query = "SELECT * FROM fct_weeks"
-    df_trend = pd.read_sql(query, con=engine)
-    print(f"✅Úspěšně načteno {len(df_trend)} řádků z databáze!")
-except Exception as e:
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    exit()
+        # 3. Heatmap occupancy data pre-aggregated in SQL (max 168 rows instead of full table)
+        wdays_query = """
+        SELECT
+            hour,
+            TRIM(den_v_tydnu) AS den_v_tydnu,
+            COUNT(member_id) AS visit_count
+        FROM (SELECT DISTINCT * FROM fct_wdays_time) t
+        GROUP BY hour, TRIM(den_v_tydnu)
+        """
+        df_wdays = pd.read_sql(wdays_query, con=conn)
 
-## TIME/DATE DATAFRAME
-try:
-    query = "SELECT DISTINCT * FROM fct_wdays_time"
-    df_wdays = pd.read_sql(query, con=engine)
-    print(f"✅Úspěšně načteno {len(df_wdays)} řádků z databáze!")
-except Exception as e:
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    exit()
+        # 4. Favorite activities
+        df_activities = pd.read_sql(
+            "SELECT DISTINCT activity_type, total_visits FROM fct_favorite_activity_month",
+            con=conn,
+        )
 
-## FAVORITE ACTIVITIES DATAFRAME
-try:
-    query = "SELECT DISTINCT activity_type, total_visits FROM fct_favorite_activity_month"
-    df_activities = pd.read_sql(query, con=engine)
-    list_activities = ["Vše"] + df_activities['activity_type'].unique().dropna().tolist()
-    print(f"✅Úspěšně načteno {len(df_activities)} řádků z databáze!")
-except Exception as e:
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    list_activities = ["Vše"]
-    exit()
+        # 5. Favorite tariffs
+        df_tariffs = pd.read_sql(
+            "SELECT DISTINCT tariff_type, count FROM fct_favorite_tariffs",
+            con=conn,
+        )
 
-## FAVORITE TARIFFS DATAFRAME
-try:
-    query = "SELECT DISTINCT tariff_type, count FROM fct_favorite_tariffs"
-    df_tariffs = pd.read_sql(query, con=engine)
-    list_tariffs = ["Vše"] + df_tariffs['tariff_type'].unique().dropna().tolist()
-    print(f"✅Úspěšně načteno {len(df_tariffs)} řádků z databáze!")
-except Exception as e:
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    list_tariffs = ["Vše"]
-    exit()
+        # 6. Churn table
+        df_churn = pd.read_sql(
+            "SELECT member_id, total_visits, first_visit, last_visit, days_since_last_visit FROM fct_churn",
+            con=conn,
+        )
+        for date_col in ["first_visit", "last_visit"]:
+            if date_col in df_churn.columns:
+                df_churn[date_col] = pd.to_datetime(df_churn[date_col]).dt.strftime("%d.%m.%Y")
+        df_churn.rename(
+            columns={
+                "member_id": "ID člena",
+                "total_visits": "Počet návštěv",
+                "days_since_last_visit": "Dny od poslední návštěvy",
+                "first_visit": "První návštěva",
+                "last_visit": "Poslední návštěva",
+            },
+            inplace=True,
+        )
 
-## DATES DATAFRAME
-try:
-    query = "SELECT MIN(date_only) AS min_date, MAX(date_only) AS max_date FROM fct_fieldgym_data"
-    df_dates = pd.read_sql(query, con=engine)
-    print(f"✅Úspěšně načteno rozsah dat z databáze!")
-    min_date = df_dates["min_date"].iloc[0]
-    max_date = df_dates["max_date"].iloc[0]
-except Exception as e:
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    exit()
+    return df_kpis, df_trend, df_wdays, df_activities, df_tariffs, df_churn
 
-## CHURN DATAFRAME
+
 try:
-    query = "SELECT member_id, total_visits, first_visit, last_visit, days_since_last_visit FROM fct_churn"
-    df_churn = pd.read_sql(query, con=engine)
-    for date_col in ["first_visit", "last_visit"]:
-        if date_col in df_churn.columns:
-            df_churn[date_col] = pd.to_datetime(df_churn[date_col]).dt.strftime("%d.%m.%Y")
-    df_churn.rename(columns={'member_id': 'ID člena', 'total_visits': 'Počet návštěv', 'days_since_last_visit': 'Dny od poslední návštěvy','first_visit':'První návštěva','last_visit':'Poslední návštěva'}, inplace=True)
-    print(f"✅Úspěšně načteno {len(df_churn)} řádků z databáze!")
+    df_kpis, df_trend, df_wdays, df_activities, df_tariffs, df_churn = load_dashboard_data()
 except Exception as e:
-    print(f"❌Chyba při načítání dat z databáze: {e}")
-    exit()
+    st.error(f"❌ Chyba při načítání dat z databáze: {e}")
+    st.stop()
+
+# EXTRACT FILTER LISTS & DATES
+list_activities = ["Vše"] + df_activities["activity_type"].dropna().unique().tolist()
+list_tariffs = ["Vše"] + df_tariffs["tariff_type"].dropna().unique().tolist()
+
+kpi_row = df_kpis.iloc[0]
+min_date = pd.to_datetime(kpi_row["min_date"]).date()
+max_date = pd.to_datetime(kpi_row["max_date"]).date()
 
 # KPIs
 ## Návštěvnost
-visitors_last_30_days = df[df['date_only'] >= (max(df['date_only']) - pd.Timedelta(days=30))]['member_id'].nunique()
-visitors_last_60_30_days = df[(df['date_only'] >= (max(df['date_only']) - pd.Timedelta(days=60))) & (df['date_only'] < (max(df['date_only']) - pd.Timedelta(days=30)))]['member_id'].nunique()
-visitors_delta_pct = ((visitors_last_30_days - visitors_last_60_30_days) / visitors_last_60_30_days) * 100 if visitors_last_60_30_days != 0 else 0
+visitors_last_30_days = int(kpi_row["visitors_last_30_days"] or 0)
+visitors_last_60_30_days = int(kpi_row["visitors_last_60_30_days"] or 0)
+visitors_delta_pct = (
+    ((visitors_last_30_days - visitors_last_60_30_days) / visitors_last_60_30_days) * 100
+    if visitors_last_60_30_days != 0
+    else 0
+)
 
 ## Včerejší návštěvnost
-visitors_yesterday = df[df['date_only'] == (max(df['date_only']) - pd.Timedelta(days=1))]['member_id'].nunique()
-average_daily_visitors = df.groupby('date_only')['member_id'].nunique().mean()
-visitors_yesterday_delta_pct = ((visitors_yesterday - average_daily_visitors) / average_daily_visitors) * 100 if average_daily_visitors != 0 else 0
+visitors_yesterday = int(kpi_row["visitors_yesterday"] or 0)
+average_daily_visitors = float(kpi_row["average_daily_visitors"] or 0)
+visitors_yesterday_delta_pct = (
+    ((visitors_yesterday - average_daily_visitors) / average_daily_visitors) * 100
+    if average_daily_visitors != 0
+    else 0
+)
 
 ## Aktuálně aktivní členové
-members_active_currently = df['member_id'].nunique()
-members_active_last_month = df[df['date_only'] >= (max(df['date_only']) - pd.Timedelta(days=30))]['member_id'].nunique()
-members_delta_pct = ((members_active_currently - members_active_last_month) / members_active_last_month) * 100 if members_active_last_month != 0 else 0
+members_active_currently = int(kpi_row["members_active_currently"] or 0)
+members_active_last_month = visitors_last_30_days
+members_delta_pct = (
+    ((members_active_currently - members_active_last_month) / members_active_last_month) * 100
+    if members_active_last_month != 0
+    else 0
+)
 
 # CHARTS
 # Official FieldGym.cz palette:
@@ -144,11 +184,7 @@ DISTINCT_CHART_PALETTE = [
 ]
 DAYS_ORDER_TOP_DOWN = ["Pondělí", "Úterý", "Středa", "Čtvrtek", "Pátek", "Sobota", "Neděle"]
 
-if "den_v_tydnu" in df_wdays.columns and df_wdays["den_v_tydnu"].dtype == object:
-    df_wdays["den_v_tydnu"] = df_wdays["den_v_tydnu"].str.strip()
-
 ## Aktuální trend návštěvnosti - line chart
-df_trend['week_start'] = pd.to_datetime(df_trend['week_start'])
 current_trend_chart = px.line(
     df_trend,
     x='week_start',
@@ -193,11 +229,11 @@ occupancy_chart = px.density_heatmap(
     df_wdays,
     x='hour',
     y='den_v_tydnu',
-    z='member_id',
-    histfunc='count',
+    z='visit_count',
+    histfunc='sum',
     category_orders={'den_v_tydnu': DAYS_ORDER_TOP_DOWN},
     color_continuous_scale=['#EFFCFC', '#B3ECEE', '#27A6B0', '#234C56', '#12323A'],
-    labels={'hour': 'Hodina', 'den_v_tydnu': 'Den v týdnu', 'member_id': 'Počet návštěv'},
+    labels={'hour': 'Hodina', 'den_v_tydnu': 'Den v týdnu', 'visit_count': 'Počet návštěv'},
     template="plotly_white",
 )
 occupancy_chart.update_traces(
@@ -775,31 +811,35 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-churn_rows_html = []
-for _, row in df_churn.iterrows():
-    cells = []
-    for col in df_churn.columns:
-        val = row[col]
-        if col == "Dny od poslední návštěvy":
-            cells.append(f'<td><span class="churn-badge">{val} dní</span></td>')
-        else:
-            cells.append(f"<td>{val}</td>")
-    churn_rows_html.append(f"<tr>{''.join(cells)}</tr>")
-
-churn_headers_html = "".join(f"<th>{col}</th>" for col in df_churn.columns)
-churn_table_html = f"""
+@st.cache_data(show_spinner=False)
+def build_churn_table_html(df_churn_data: pd.DataFrame) -> str:
+    cols = list(df_churn_data.columns)
+    badge_idx = cols.index("Dny od poslední návštěvy") if "Dny od poslední návštěvy" in cols else -1
+    headers_html = "".join(f"<th>{col}</th>" for col in cols)
+    rows_html = [
+        "<tr>"
+        + "".join(
+            f'<td><span class="churn-badge">{val} dní</span></td>' if i == badge_idx else f"<td>{val}</td>"
+            for i, val in enumerate(row)
+        )
+        + "</tr>"
+        for row in df_churn_data.itertuples(index=False, name=None)
+    ]
+    return f"""
 <div class="churn-table-wrapper">
     <table class="churn-table">
         <thead>
-            <tr>{churn_headers_html}</tr>
+            <tr>{headers_html}</tr>
         </thead>
         <tbody>
-            {''.join(churn_rows_html)}
+            {''.join(rows_html)}
         </tbody>
     </table>
 </div>
 """
-st.markdown(churn_table_html, unsafe_allow_html=True)
+
+
+st.markdown(build_churn_table_html(df_churn), unsafe_allow_html=True)
 
 
 
